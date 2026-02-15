@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+motor
+pydantic
+pydantic-settings
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+emails
+python-dotenv
+aiofiles
+opencv-python-headless
+tensorflow
+numpy
+Pillow
+requests

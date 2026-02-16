@@ -72,18 +72,6 @@ const AdminPanel = () => {
             const fullStreamUrl = `http://localhost:8000${response.data.stream_url}`;
             setStreamUrl(fullStreamUrl);
             setShowUrlModal(true);
-
-            setTimeout(async () => {
-                try {
-                    await axios.post('http://localhost:8000/alerts/', {
-                        location: "Simulated Stream Location",
-                        details: "Auto-generated alert: Potential incident detected in uploaded stream"
-                    });
-                    console.log("Auto-alert generated after 2 minutes");
-                } catch (error) {
-                    console.error("Error generating auto-alert", error);
-                }
-            }, 120000);
         } catch (error) {
             alert("Error uploading video");
         }

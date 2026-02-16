@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe, Activity } from 'lucide-react';
+import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe, Activity, Bell } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 
@@ -202,6 +202,65 @@ const DashboardOverview = () => {
     const [selectedAlert, setSelectedAlert] = useState(null);
     const [isLogsOpen, setIsLogsOpen] = useState(false);
 
+    // Track previous alert count for notifications
+    const [previousAlertCount, setPreviousAlertCount] = useState(0);
+    const [notificationPermission, setNotificationPermission] = useState(false);
+    const [toastNotifications, setToastNotifications] = useState([]);
+
+    // Request notification permission on mount
+    useEffect(() => {
+        if ('Notification' in window) {
+            if (Notification.permission === 'granted') {
+                setNotificationPermission(true);
+            } else if (Notification.permission !== 'denied') {
+                Notification.requestPermission().then(permission => {
+                    setNotificationPermission(permission === 'granted');
+                });
+            }
+        }
+    }, []);
+
+    // Show notification for new alerts
+    const showNotification = (alert) => {
+        // Show in-app toast notification
+        const toastId = Date.now();
+        setToastNotifications(prev => [...prev, { ...alert, toastId }]);
+
+        // Auto-remove toast after 8 seconds
+        setTimeout(() => {
+            setToastNotifications(prev => prev.filter(n => n.toastId !== toastId));
+        }, 8000);
+
+        // Show browser notification if permitted
+        if (notificationPermission && 'Notification' in window) {
+            const notification = new Notification('🚨 New Alert Detected!', {
+                body: `Location: ${alert.location}\n${alert.details}`,
+                icon: '/alert-icon.png',
+                badge: '/alert-badge.png',
+                tag: alert._id,
+                requireInteraction: true,
+                vibrate: [200, 100, 200],
+            });
+
+            notification.onclick = () => {
+                window.focus();
+                setSelectedAlert(alert);
+                setIsLogsOpen(true);
+                notification.close();
+            };
+
+            setTimeout(() => notification.close(), 10000);
+        }
+
+        // Play alert sound
+        try {
+            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTUHG2m98OScTgwNUrDn77RnHwU7k9n0yXgqBSB0yO/ekEMME1+35+mhUBMJSKHh8rtoHwU7k9n0yXgqBR91x+/gkEIOFF+36OehTxMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEMME1+36OehTxMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEMOFF+35+mhUBQJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEQME1+35+mhUBQJSKHh8rtoHwU7k9n0yXgqBSB0x+/gkEQMFF+35+mhUBMJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBR90x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMKSaLh8g==');
+            audio.play().catch(() => {});
+        } catch (e) {
+            // Ignore audio errors
+        }
+    };
+
     const processChartData = (alerts, range) => {
         const now = new Date();
         let buckets = [];
@@ -328,16 +387,30 @@ const DashboardOverview = () => {
                 axios.get('http://localhost:8000/users/')
             ]);
 
+            const newAlerts = alertsRes.data;
+
+            // Check for new alerts and show notifications
+            if (previousAlertCount > 0 && newAlerts.length > previousAlertCount) {
+                // Get the new alerts (alerts that weren't in the previous fetch)
+                const alertsToNotify = newAlerts.slice(0, newAlerts.length - previousAlertCount);
+                alertsToNotify.forEach(alert => {
+                    showNotification(alert);
+                });
+            }
+
+            // Update previous count
+            setPreviousAlertCount(newAlerts.length);
+
             setStats({
-                alerts: alertsRes.data.length,
+                alerts: newAlerts.length,
                 activeStreams: streamsRes.data.filter(s => s.is_active).length,
                 cameras: camerasRes.data.length,
                 users: usersRes.data.length
             });
-            setAllAlerts(alertsRes.data);
+            setAllAlerts(newAlerts);
             setCameras(camerasRes.data);
             setStreams(streamsRes.data);
-            setChartData(processChartData(alertsRes.data, timeRange));
+            setChartData(processChartData(newAlerts, timeRange));
         } catch (error) {
             console.error("Error fetching dashboard data", error);
         }
@@ -410,6 +483,43 @@ const DashboardOverview = () => {
     return (
         <div className="p-8 relative">
             <h2 className="text-2xl font-bold text-gray-800 mb-6">Dashboard Overview</h2>
+
+            {/* Toast Notifications */}
+            <div className="fixed top-4 right-4 z-50 space-y-3 max-w-md">
+                {toastNotifications.map((notification) => (
+                    <div
+                        key={notification.toastId}
+                        className="bg-red-600 text-white rounded-lg shadow-2xl p-4 border-l-4 border-red-800 animate-slide-in-right flex items-start space-x-3"
+                        style={{
+                            animation: 'slideInRight 0.3s ease-out'
+                        }}
+                    >
+                        <div className="flex-shrink-0">
+                            <Bell className="h-6 w-6 animate-bounce" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <p className="font-bold text-sm mb-1">🚨 New Alert Detected!</p>
+                            <p className="text-xs opacity-90 mb-1">
+                                <MapPin className="h-3 w-3 inline mr-1" />
+                                {notification.location}
+                            </p>
+                            <p className="text-xs opacity-80 line-clamp-2">{notification.details}</p>
+                        </div>
+                        <button
+                            onClick={() => {
+                                setToastNotifications(prev =>
+                                    prev.filter(n => n.toastId !== notification.toastId)
+                                );
+                                setSelectedAlert(notification);
+                                setIsLogsOpen(true);
+                            }}
+                            className="flex-shrink-0 text-white hover:text-red-200 transition-colors"
+                        >
+                            <X className="h-5 w-5" />
+                        </button>
+                    </div>
+                ))}
+            </div>
 
             {/* Logs Panel */}
             <LogsPanel

@@ -217,7 +217,8 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                             from ..services.email_service import email_service
                             for email in hospital_emails:
                                 try:
-                                    await asyncio.create_task(
+                                    # Create task without awaiting to send emails in background
+                                    asyncio.create_task(
                                         email_service.send_alert_email(
                                             to_email=email,
                                             location=camera_location,
@@ -225,8 +226,9 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                                             time=alert_data["time"].strftime("%Y-%m-%d %H:%M:%S")
                                         )
                                     )
+                                    logger.info(f"Email task created for {email}")
                                 except Exception as e:
-                                    logger.error(f"Error sending email to {email}: {e}")
+                                    logger.error(f"Error creating email task for {email}: {e}")
                             
                         except Exception as e:
                             logger.error(f"Error creating alert: {e}")
@@ -240,12 +242,18 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
             
             # Control frame rate (approx 10-15 fps processing)
             await asyncio.sleep(0.05)
-            
+
+        except asyncio.CancelledError:
+            # Task was cancelled (stop detection was called)
+            logger.info(f"Detection task cancelled for camera {camera_id}")
+            break
         except Exception as e:
             logger.error(f"Error in detection loop: {e}")
             await asyncio.sleep(1)
-    
+
+    # Cleanup
     cap.release()
+    accident_detection_service.stop_detection(camera_id)
     logger.info(f"Detection loop ended for camera {camera_id}")
 
 @router.post("/start/{camera_id}")
@@ -311,32 +319,43 @@ async def stop_detection(
 ):
     """Stop accident detection for a specific camera"""
     try:
-        # Stop detection service
+        # Stop detection service first
         stopped = accident_detection_service.stop_detection(camera_id)
-        
-        if not stopped:
-            return {"message": "Detection was not active", "camera_id": camera_id}
-        
+
+        logger.info(f"Detection service stopped for camera {camera_id}: {stopped}")
+
         # Cancel background task if exists
         if camera_id in active_detection_tasks:
             task = active_detection_tasks[camera_id]
             task.cancel()
+
+            # Wait for the task to actually finish (with timeout)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                # Task was cancelled or didn't finish in time, that's okay
+                pass
+            except Exception as e:
+                logger.warning(f"Error while waiting for task cancellation: {e}")
+
+            # Remove from active tasks
             del active_detection_tasks[camera_id]
-        
+            logger.info(f"Background task cancelled for camera {camera_id}")
+
         # Update camera status in database
         db = await get_database()
         await db["cameras"].update_one(
             {"_id": ObjectId(camera_id)},
             {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
         )
-        
-        logger.info(f"Stopped detection for camera {camera_id}")
-        
+
+        logger.info(f"Successfully stopped detection for camera {camera_id}")
+
         return {
             "message": "Detection stopped successfully",
             "camera_id": camera_id
         }
-        
+
     except Exception as e:
         logger.error(f"Error stopping detection: {e}")
         raise HTTPException(status_code=500, detail=str(e))

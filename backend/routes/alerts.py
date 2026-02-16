@@ -42,3 +42,9 @@ async def delete_alert(alert_id: str, current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=404, detail="Alert not found")
     await db["alerts"].delete_one({"_id": ObjectId(alert_id)})
     return {"message": "Alert deleted successfully"}
+
+@router.delete("/all/delete")
+async def delete_all_alerts(current_user: dict = Depends(get_current_user)):
+    db = await get_database()
+    await db["alerts"].delete_many({})
+    return {"message": "All alerts deleted successfully"}

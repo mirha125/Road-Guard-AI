@@ -1,8 +1,15 @@
 from pydantic import BaseModel, EmailStr, Field, field_serializer
 from typing import Optional, List, Annotated
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from pydantic_core import core_schema
+
+# GMT+5 timezone (Pakistan Standard Time)
+PKT = timezone(timedelta(hours=5))
+
+def get_pkt_now():
+    """Get current time in GMT+5 (Pakistan Standard Time)"""
+    return datetime.now(PKT)
 class PyObjectId(str):
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):
@@ -29,7 +36,7 @@ class UserModel(BaseModel):
     password: str
     role: str  
     approval_status: str = "pending"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=get_pkt_now)
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -57,7 +64,7 @@ class CameraModel(BaseModel):
     detection_active: bool = False
     detection_started_at: Optional[datetime] = None
     detection_stopped_at: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=get_pkt_now)
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -69,7 +76,7 @@ class StreamModel(BaseModel):
     video_path: str
     stream_url: str
     is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=get_pkt_now)
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -78,7 +85,7 @@ class StreamModel(BaseModel):
 class AlertModel(BaseModel):
     id: Optional[PyObjectId] = Field(default=None, alias="_id")
     location: str
-    time: datetime = Field(default_factory=datetime.utcnow)
+    time: datetime = Field(default_factory=get_pkt_now)
     details: str
     notified_hospitals: List[EmailStr] = []
     model_config = {

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, UploadFi
 from typing import Optional
 from datetime import datetime
 from ..database import get_database
-from ..models import CameraModel, AlertModel
+from ..models import CameraModel, AlertModel, get_pkt_now
 from ..services.accident_detection_service import accident_detection_service
 from .users import get_current_user
 from .alerts import create_alert
@@ -52,7 +52,7 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                 db = await get_database()
                 await db["cameras"].update_one(
                     {"_id": ObjectId(camera_id)},
-                    {"$set": {"detection_active": False, "detection_stopped_at": datetime.utcnow()}}
+                    {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
                 )
                 return
         except Exception as e:
@@ -94,7 +94,7 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                 db = await get_database()
                 await db["cameras"].update_one(
                     {"_id": ObjectId(camera_id)},
-                    {"$set": {"detection_active": False, "detection_stopped_at": datetime.utcnow()}}
+                    {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
                 )
                 return
         
@@ -108,7 +108,7 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
             db = await get_database()
             await db["cameras"].update_one(
                 {"_id": ObjectId(camera_id)},
-                {"$set": {"detection_active": False, "detection_stopped_at": datetime.utcnow()}}
+                {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
             )
             return
     
@@ -122,7 +122,7 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
         db = await get_database()
         await db["cameras"].update_one(
             {"_id": ObjectId(camera_id)},
-            {"$set": {"detection_active": False, "detection_stopped_at": datetime.utcnow()}}
+            {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
         )
         return
 
@@ -130,21 +130,46 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
     detection_threshold = 3  # Number of consecutive detections before triggering alert
     cooldown_frames = 0
     cooldown_period = 150  # Frames to wait after an alert
-    
+    consecutive_failures = 0
+    max_failures = 10  # Stop detection after this many consecutive failures
+
     loop = asyncio.get_event_loop()
-    
+
     while accident_detection_service.is_detection_active(camera_id):
         try:
             # Read frame in a separate thread to avoid blocking the event loop
             ret, frame = await loop.run_in_executor(None, cap.read)
-            
+
             if not ret:
-                logger.warning(f"Failed to read frame from camera {camera_id}, retrying...")
+                consecutive_failures += 1
+                logger.warning(f"Failed to read frame from camera {camera_id} ({consecutive_failures}/{max_failures}), retrying...")
+
+                # Check if video ended (for file-based streams, loop it)
+                if not camera_url.startswith(("http://", "https://", "rtsp://")):
+                    logger.info(f"Video file ended for camera {camera_id}, restarting from beginning...")
+                    cap.release()
+                    cap = cv2.VideoCapture(camera_url)
+                    consecutive_failures = 0  # Reset counter for looped videos
+                    continue
+
+                if consecutive_failures >= max_failures:
+                    logger.error(f"Max consecutive failures reached for camera {camera_id}, stopping detection")
+                    accident_detection_service.stop_detection(camera_id)
+                    db = await get_database()
+                    await db["cameras"].update_one(
+                        {"_id": ObjectId(camera_id)},
+                        {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
+                    )
+                    break
+
                 await asyncio.sleep(1)
                 # Try to reopen
                 cap.release()
                 cap = cv2.VideoCapture(camera_url)
                 continue
+
+            # Reset failure counter on successful read
+            consecutive_failures = 0
             
             if frame is not None:
                 # Process frame for accident detection
@@ -177,7 +202,7 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                             # Create alert document
                             alert_data = {
                                 "location": camera_location,
-                                "time": datetime.utcnow(),
+                                "time": get_pkt_now(),
                                 "details": f"🚨 ACCIDENT DETECTED at {camera_name} with {confidence*100:.1f}% confidence. Automatic detection triggered by AI model.",
                                 "notified_hospitals": hospital_emails,
                                 "camera_id": camera_id,
@@ -262,7 +287,7 @@ async def start_detection(
         # Update camera status in database
         await db["cameras"].update_one(
             {"_id": ObjectId(camera_id)},
-            {"$set": {"detection_active": True, "detection_started_at": datetime.utcnow()}}
+            {"$set": {"detection_active": True, "detection_started_at": get_pkt_now()}}
         )
         
         logger.info(f"Started detection for camera {camera_id}")
@@ -302,7 +327,7 @@ async def stop_detection(
         db = await get_database()
         await db["cameras"].update_one(
             {"_id": ObjectId(camera_id)},
-            {"$set": {"detection_active": False, "detection_stopped_at": datetime.utcnow()}}
+            {"$set": {"detection_active": False, "detection_stopped_at": get_pkt_now()}}
         )
         
         logger.info(f"Stopped detection for camera {camera_id}")

@@ -75,11 +75,17 @@ class AccidentDetectionService:
                 raise
     
     def preprocess_frame(self, frame):
-        """Preprocess a single frame for the model"""
-        # Resize frame to the required size
+        """Preprocess a single frame for the model.
+        
+        IMPORTANT: During training, the data generator simply resized BGR frames 
+        and cast to float (no preprocess_input, no BGR→RGB conversion).
+        We must match that exact preprocessing here for correct predictions.
+        """
+        # Resize frame to the required size (keep BGR, same as training)
         resized_frame = cv2.resize(frame, (self.image_height, self.image_width))
-        # Return raw BGR frame (0-255) as trained
-        return resized_frame.astype(np.float32)
+        # Cast to float32 (training used float16 for memory, float32 is fine for inference)
+        preprocessed_frame = resized_frame.astype(np.float32)
+        return preprocessed_frame
     
     
     def predict_accident(self, frames_buffer: deque) -> tuple[bool, float]:
@@ -107,8 +113,8 @@ class AccidentDetectionService:
             # Index 0 is Normal, Index 1 is Accident
             confidence = float(prediction[0][1])
             
-            # Threshold for accident detection
-            is_accident = confidence > 0.5
+            # Threshold for accident detection (raised from 0.5 to 0.7 to reduce false positives)
+            is_accident = confidence > 0.7
             
             logger.info(f"Prediction: {confidence:.4f}, Accident: {is_accident}")
             
@@ -156,20 +162,22 @@ class AccidentDetectionService:
         """
         if not self.is_detection_active(camera_id):
             return False, 0.0
-        
+
         # Preprocess the frame
         processed_frame = self.preprocess_frame(frame)
-        
+
         # Add to buffer
         if camera_id not in self.frame_buffers:
             self.frame_buffers[camera_id] = deque(maxlen=self.sequence_length)
-        
+
         self.frame_buffers[camera_id].append(processed_frame)
-        
+
         # Only predict when we have enough frames
         if len(self.frame_buffers[camera_id]) >= self.sequence_length:
-            return self.predict_accident(self.frame_buffers[camera_id])
-        
+            # Run prediction in thread pool to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self.predict_accident, self.frame_buffers[camera_id])
+
         return False, 0.0
 
 # Global instance

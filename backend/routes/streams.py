@@ -62,7 +62,8 @@ async def list_streams(current_user: dict = Depends(get_current_user)):
     streams = await db["streams"].find().to_list(1000)
     return streams
 @router.patch("/{stream_id}/stop")
-async def stop_stream(stream_id: str, current_user: dict = Depends(get_current_admin_user)):
+async def stop_stream(stream_id: str, current_user: dict = Depends(get_current_user)):
+
     db = await get_database()
     stream = await db["streams"].find_one({"_id": ObjectId(stream_id)})
     if not stream:
@@ -73,7 +74,8 @@ async def stop_stream(stream_id: str, current_user: dict = Depends(get_current_a
     )
     return {"message": "Stream stopped successfully"}
 @router.delete("/{stream_id}")
-async def delete_stream(stream_id: str, current_user: dict = Depends(get_current_admin_user)):
+async def delete_stream(stream_id: str, current_user: dict = Depends(get_current_user)):
+
     db = await get_database()
     stream = await db["streams"].find_one({"_id": ObjectId(stream_id)})
     if not stream:
@@ -82,3 +84,20 @@ async def delete_stream(stream_id: str, current_user: dict = Depends(get_current
         os.remove(stream["video_path"])
     result = await db["streams"].delete_one({"_id": ObjectId(stream_id)})
     return {"message": "Stream deleted successfully"}
+
+@router.delete("/all/delete")
+async def delete_all_streams(current_user: dict = Depends(get_current_admin_user)):
+    db = await get_database()
+    streams = await db["streams"].find().to_list(1000)
+    
+    # Delete all files
+    for stream in streams:
+        if "video_path" in stream and os.path.exists(stream["video_path"]):
+            try:
+                os.remove(stream["video_path"])
+            except Exception as e:
+                print(f"Error deleting file {stream['video_path']}: {e}")
+                
+    # Delete all records
+    await db["streams"].delete_many({})
+    return {"message": "All streams deleted successfully"}

@@ -40,9 +40,31 @@ const StreamHistory = () => {
         }
     };
 
+    const handleDeleteAll = async () => {
+        if (!confirm("Are you sure you want to PERMANENTLY DELETE ALL STREAMS? This action cannot be undone.")) return;
+        try {
+            await axios.delete('http://localhost:8000/streams/all/delete');
+            fetchStreams();
+        } catch (error) {
+            console.error("Error deleting all streams", error);
+            alert("Failed to delete all streams");
+        }
+    };
+
     return (
         <div className="p-8">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6">Stream History</h2>
+            <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold text-gray-800">Stream History</h2>
+                {user?.role === 'admin' && streams.length > 0 && (
+                    <button
+                        onClick={handleDeleteAll}
+                        className="flex items-center px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors text-sm font-medium shadow-sm"
+                    >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete All Streams
+                    </button>
+                )}
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {streams.map((stream) => (
@@ -69,14 +91,6 @@ const StreamHistory = () => {
                                         Created: {new Date(stream.created_at).toLocaleDateString()}
                                     </p>
                                 </div>
-                                {user?.role === 'admin' && (
-                                    <button
-                                        onClick={() => handleDelete(stream._id)}
-                                        className="text-gray-400 hover:text-red-500 transition-colors"
-                                    >
-                                        <Trash2 className="h-5 w-5" />
-                                    </button>
-                                )}
                             </div>
                             <div className="mt-4 space-y-2">
                                 <div className="flex items-center justify-between">
@@ -97,14 +111,27 @@ const StreamHistory = () => {
                                         {`http://localhost:8000${stream.stream_url}`}
                                     </p>
                                 </div>
-                                {user?.role === 'admin' && stream.is_active && (
+                                <div className="grid grid-cols-2 gap-2 pt-2">
+                                    {stream.is_active ? (
+                                        <button
+                                            onClick={() => handleStopStream(stream._id)}
+                                            className="bg-amber-500 hover:bg-amber-600 text-white py-2 rounded text-sm font-medium transition-colors flex items-center justify-center"
+                                        >
+                                            Stop
+                                        </button>
+                                    ) : (
+                                        <div className="bg-gray-100 text-gray-400 py-2 rounded text-sm font-medium text-center flex items-center justify-center cursor-not-allowed">
+                                            Inactive
+                                        </div>
+                                    )}
                                     <button
-                                        onClick={() => handleStopStream(stream._id)}
-                                        className="w-full bg-red-500 hover:bg-red-600 text-white py-2 rounded text-sm font-medium transition-colors"
+                                        onClick={() => handleDelete(stream._id)}
+                                        className="bg-red-500 hover:bg-red-600 text-white py-2 rounded text-sm font-medium transition-colors flex items-center justify-center space-x-1"
                                     >
-                                        Stop Stream
+                                        <Trash2 className="h-4 w-4" />
+                                        <span>Delete</span>
                                     </button>
-                                )}
+                                </div>
                             </div>
                         </div>
                     </div>

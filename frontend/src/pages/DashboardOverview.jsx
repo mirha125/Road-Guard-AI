@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Video, Activity, MapPin, Trash2, Camera } from 'lucide-react';
+import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 
@@ -92,6 +92,98 @@ const CameraCard = ({ camera }) => {
     );
 };
 
+const LogsPanel = ({ alert, onClose, isOpen }) => {
+    if (!isOpen || !alert) return null;
+
+    return (
+        <>
+            {/* Backdrop */}
+            <div
+                className="fixed inset-0 bg-black bg-opacity-25 z-40 transition-opacity"
+                onClick={onClose}
+            ></div>
+
+            {/* Panel */}
+            <div className="fixed inset-y-0 right-0 w-96 bg-white shadow-2xl transform transition-transform duration-300 ease-in-out z-50 border-l border-gray-200 flex flex-col">
+                <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                    <h3 className="text-lg font-bold text-gray-800 flex items-center">
+                        <FileText className="h-5 w-5 mr-2 text-blue-600" />
+                        Alert Logs
+                    </h3>
+                    <button
+                        onClick={onClose}
+                        className="text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-200 transition-colors"
+                    >
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+
+                <div className="p-6 overflow-y-auto flex-1">
+                    <div className="mb-8">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Alert Details</h4>
+                        <div className="bg-red-50 p-4 rounded-lg border border-red-100">
+                            <div className="flex items-start mb-2">
+                                <AlertTriangle className="h-5 w-5 text-red-500 mr-2 mt-0.5" />
+                                <span className="font-semibold text-red-700">Accident Detected</span>
+                            </div>
+                            <p className="text-gray-700 text-sm mb-3 ml-7">{alert.details}</p>
+                            <div className="flex items-center text-xs text-gray-500 ml-7 space-x-4">
+                                <span className="flex items-center">
+                                    <MapPin className="h-3 w-3 mr-1" />
+                                    {alert.location}
+                                </span>
+                                <span className="flex items-center">
+                                    <Globe className="h-3 w-3 mr-1" />
+                                    {new Date(alert.time).toLocaleString()}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between">
+                            <span>Email Recipients</span>
+                            <span className="text-xs font-normal text-gray-400 normal-case bg-gray-100 px-2 py-0.5 rounded-full">
+                                {alert.notified_hospitals?.length || 0} sent
+                            </span>
+                        </h4>
+
+                        {alert.notified_hospitals && alert.notified_hospitals.length > 0 ? (
+                            <ul className="space-y-2">
+                                {alert.notified_hospitals.map((email, index) => (
+                                    <li key={index} className="flex items-center p-3 bg-white rounded-lg border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                        <div className="bg-blue-50 p-2 rounded-full mr-3 border border-blue-100">
+                                            <Mail className="h-4 w-4 text-blue-600" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium text-gray-900 truncate">{email}</p>
+                                            <p className="text-xs text-gray-500">Hospital Notification</p>
+                                        </div>
+                                        <div className="ml-2">
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                Sent
+                                            </span>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        ) : (
+                            <div className="text-center py-12 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200">
+                                <Mail className="h-8 w-8 text-gray-300 mx-auto mb-2" />
+                                <p className="text-gray-500 text-sm font-medium">No emails sent for this alert.</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="p-4 border-t border-gray-100 bg-gray-50 text-center text-xs text-gray-400">
+                    Alert ID: {alert._id}
+                </div>
+            </div>
+        </>
+    );
+};
+
 const DashboardOverview = () => {
     const { user } = useAuth();
     const [stats, setStats] = useState({
@@ -100,12 +192,15 @@ const DashboardOverview = () => {
         cameras: 0,
         users: 0
     });
-    const [recentAlerts, setRecentAlerts] = useState([]);
     const [allAlerts, setAllAlerts] = useState([]);
     const [cameras, setCameras] = useState([]);
     const [streams, setStreams] = useState([]);
     const [chartData, setChartData] = useState([]);
     const [timeRange, setTimeRange] = useState('24h');
+
+    // Logs Panel State
+    const [selectedAlert, setSelectedAlert] = useState(null);
+    const [isLogsOpen, setIsLogsOpen] = useState(false);
 
     const processChartData = (alerts, range) => {
         const now = new Date();
@@ -128,7 +223,9 @@ const DashboardOverview = () => {
                     if (alertTime >= startTime) {
                         const hour = alertTime.getHours();
                         const bucketIndex = Math.floor(hour / 4);
-                        buckets[bucketIndex].count++;
+                        if (buckets[bucketIndex]) {
+                            buckets[bucketIndex].count++;
+                        }
                     }
                 });
                 break;
@@ -237,7 +334,6 @@ const DashboardOverview = () => {
                 cameras: camerasRes.data.length,
                 users: usersRes.data.length
             });
-            setRecentAlerts(alertsRes.data.slice(0, 5));
             setAllAlerts(alertsRes.data);
             setCameras(camerasRes.data);
             setStreams(streamsRes.data);
@@ -270,6 +366,22 @@ const DashboardOverview = () => {
         }
     };
 
+    const handleDeleteAllAlerts = async () => {
+        if (!confirm("Are you sure you want to PERMANENTLY DELETE ALL ALERTS? This action cannot be undone.")) return;
+        try {
+            await axios.delete('http://localhost:8000/alerts/all/delete');
+            fetchData();
+        } catch (error) {
+            console.error("Error deleting all alerts", error);
+            alert("Failed to delete all alerts");
+        }
+    };
+
+    const openLogs = (alert) => {
+        setSelectedAlert(alert);
+        setIsLogsOpen(true);
+    };
+
     const CustomTooltip = ({ active, payload }) => {
         if (active && payload && payload.length) {
             return (
@@ -296,8 +408,15 @@ const DashboardOverview = () => {
     };
 
     return (
-        <div className="p-8">
+        <div className="p-8 relative">
             <h2 className="text-2xl font-bold text-gray-800 mb-6">Dashboard Overview</h2>
+
+            {/* Logs Panel */}
+            <LogsPanel
+                alert={selectedAlert}
+                isOpen={isLogsOpen}
+                onClose={() => setIsLogsOpen(false)}
+            />
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <StatCard title="Total Alerts" value={stats.alerts} icon={AlertTriangle} color="bg-red-500" />
@@ -334,48 +453,86 @@ const DashboardOverview = () => {
             </div>
 
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden mb-8">
-                <div className="p-6 border-b border-gray-100">
-                    <h3 className="text-lg font-bold text-gray-800">Recent Alerts</h3>
+                <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                    <div>
+                        <h3 className="text-lg font-bold text-gray-800">All Alerts History</h3>
+                        <p className="text-sm text-gray-500">Complete log of all detected incidents</p>
+                    </div>
+                    <div className="flex items-center space-x-3">
+                        <div className="bg-white px-3 py-1 rounded-full text-xs font-semibold text-gray-500 border border-gray-200">
+                            {allAlerts.length} Total Records
+                        </div>
+                        {user?.role === 'admin' && allAlerts.length > 0 && (
+                            <button
+                                onClick={handleDeleteAllAlerts}
+                                className="flex items-center px-3 py-1.5 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-xs font-medium border border-red-100"
+                            >
+                                <Trash2 className="h-4 w-4 mr-1.5" />
+                                Delete All
+                            </button>
+                        )}
+                    </div>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
                     <table className="w-full text-left">
-                        <thead className="bg-gray-50 text-gray-600 font-medium text-sm">
+                        <thead className="bg-white text-gray-600 font-bold text-xs uppercase tracking-wider sticky top-0 z-10 shadow-sm">
                             <tr>
-                                <th className="px-6 py-3">Location</th>
-                                <th className="px-6 py-3">Time</th>
-                                <th className="px-6 py-3">Details</th>
-                                <th className="px-6 py-3">Status</th>
-                                {user?.role === 'admin' && <th className="px-6 py-3">Actions</th>}
+                                <th className="px-6 py-4 border-b">Location / Time</th>
+                                <th className="px-6 py-4 border-b">Details</th>
+                                <th className="px-6 py-4 border-b">Status</th>
+                                {user?.role === 'admin' && <th className="px-6 py-4 border-b text-right">Actions</th>}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                            {recentAlerts.map((alert) => (
-                                <tr key={alert._id} className="hover:bg-gray-50 transition-colors">
-                                    <td className="px-6 py-4 font-medium text-gray-800">{alert.location}</td>
-                                    <td className="px-6 py-4 text-gray-500">{new Date(alert.time).toLocaleString()}</td>
-                                    <td className="px-6 py-4 text-gray-600">{alert.details}</td>
+                            {allAlerts.map((alert) => (
+                                <tr key={alert._id} className="hover:bg-gray-50 transition-colors group">
                                     <td className="px-6 py-4">
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                        <div className="font-bold text-gray-800">{alert.location}</div>
+                                        <div className="text-xs text-gray-500 mt-1 flex items-center">
+                                            <Globe className="h-3 w-3 mr-1" />
+                                            {new Date(alert.time).toLocaleString()}
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <p className="text-sm text-gray-600 line-clamp-2">{alert.details}</p>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 border border-red-200">
                                             Critical
                                         </span>
                                     </td>
                                     {user?.role === 'admin' && (
-                                        <td className="px-6 py-4">
-                                            <button
-                                                onClick={() => handleDeleteAlert(alert._id)}
-                                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 transition-colors"
-                                                title="Delete Alert"
-                                            >
-                                                <Trash2 className="h-5 w-5" />
-                                            </button>
+                                        <td className="px-6 py-4 text-right">
+                                            <div className="flex items-center justify-end space-x-2">
+                                                <button
+                                                    onClick={() => openLogs(alert)}
+                                                    className="flex items-center text-blue-600 hover:text-blue-800 px-3 py-1.5 rounded-md hover:bg-blue-50 transition-colors text-xs font-medium border border-transparent hover:border-blue-200"
+                                                    title="View Logs"
+                                                >
+                                                    <FileText className="h-4 w-4 mr-1.5" />
+                                                    Logs
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteAlert(alert._id)}
+                                                    className="flex items-center text-red-500 hover:text-red-700 px-3 py-1.5 rounded-md hover:bg-red-50 transition-colors text-xs font-medium border border-transparent hover:border-red-200"
+                                                    title="Delete Alert"
+                                                >
+                                                    <Trash2 className="h-4 w-4 mr-1.5" />
+                                                    Delete
+                                                </button>
+                                            </div>
                                         </td>
                                     )}
                                 </tr>
                             ))}
-                            {recentAlerts.length === 0 && (
+                            {allAlerts.length === 0 && (
                                 <tr>
-                                    <td colSpan={user?.role === 'admin' ? "5" : "4"} className="px-6 py-8 text-center text-gray-500">
-                                        No alerts generated yet.
+                                    <td colSpan={user?.role === 'admin' ? "4" : "3"} className="px-6 py-12 text-center text-gray-500 bg-gray-50">
+                                        <div className="flex flex-col items-center">
+                                            <AlertTriangle className="h-10 w-10 text-gray-300 mb-3" />
+                                            <p className="font-medium">No alerts generated yet</p>
+                                            <p className="text-sm text-gray-400 mt-1">System is monitoring for accidents...</p>
+                                        </div>
                                     </td>
                                 </tr>
                             )}

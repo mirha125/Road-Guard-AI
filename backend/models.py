@@ -34,9 +34,15 @@ class UserModel(BaseModel):
     name: str
     email: EmailStr
     password: str
-    role: str  
+    role: str
     approval_status: str = "pending"
     created_at: datetime = Field(default_factory=get_pkt_now)
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, dt: datetime, _info):
+        # MongoDB expects timezone-aware datetime, return as-is
+        return dt
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -65,6 +71,12 @@ class CameraModel(BaseModel):
     detection_started_at: Optional[datetime] = None
     detection_stopped_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=get_pkt_now)
+
+    @field_serializer('created_at', 'detection_started_at', 'detection_stopped_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        # MongoDB expects timezone-aware datetime, return as-is
+        return dt
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -77,6 +89,12 @@ class StreamModel(BaseModel):
     stream_url: str
     is_active: bool = True
     created_at: datetime = Field(default_factory=get_pkt_now)
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, dt: datetime, _info):
+        # MongoDB expects timezone-aware datetime, return as-is
+        return dt
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -88,6 +106,12 @@ class AlertModel(BaseModel):
     time: datetime = Field(default_factory=get_pkt_now)
     details: str
     notified_hospitals: List[EmailStr] = []
+
+    @field_serializer('time')
+    def serialize_time(self, dt: datetime, _info):
+        # MongoDB expects timezone-aware datetime, return as-is
+        return dt
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,

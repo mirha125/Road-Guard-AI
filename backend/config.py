@@ -1,5 +1,11 @@
 from pydantic_settings import BaseSettings
 from typing import List
+from pathlib import Path
+
+# Get the backend directory path
+BACKEND_DIR = Path(__file__).parent
+ENV_FILE = BACKEND_DIR / ".env"
+
 class Settings(BaseSettings):
     MONGO_URI: str
     DB_NAME: str
@@ -16,6 +22,11 @@ class Settings(BaseSettings):
     MAIL_FROM_NAME: str
     PORT: int = 8000
     HOST: str = "0.0.0.0"
+
     class Config:
-        env_file = "backend/.env"
+        env_file = str(ENV_FILE)
+        env_file_encoding = 'utf-8'
+
+print(f"Loading .env from: {ENV_FILE}")
+print(f".env file exists: {ENV_FILE.exists()}")
 settings = Settings()

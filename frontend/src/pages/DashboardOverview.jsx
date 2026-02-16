@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe } from 'lucide-react';
+import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe, Activity } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 

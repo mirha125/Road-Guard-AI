@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, UploadFile, File
 from typing import Optional
 from datetime import datetime
+from collections import deque
+from pathlib import Path
 from ..database import get_database
 from ..models import CameraModel, AlertModel, get_pkt_now
 from ..services.accident_detection_service import accident_detection_service
@@ -11,6 +13,7 @@ import numpy as np
 import cv2
 import asyncio
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,16 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
     consecutive_failures = 0
     max_failures = 10  # Stop detection after this many consecutive failures
 
+    # Rolling buffer for video snippet capture (~3 seconds at ~15fps)
+    snippet_buffer = deque(maxlen=45)
+    # Get source FPS for snippet encoding
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
+    snippet_fps = min(source_fps, 15.0)
+
+    # Snippets directory
+    snippets_dir = Path(__file__).resolve().parent.parent / "uploads" / "snippets"
+    snippets_dir.mkdir(parents=True, exist_ok=True)
+
     loop = asyncio.get_event_loop()
 
     while accident_detection_service.is_detection_active(camera_id):
@@ -172,6 +185,9 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
             consecutive_failures = 0
             
             if frame is not None:
+                # Buffer frames for snippet capture
+                snippet_buffer.append(frame.copy())
+
                 # Process frame for accident detection
                 is_accident, confidence = await accident_detection_service.process_frame(camera_id, frame)
                 
@@ -191,45 +207,54 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                     if consecutive_detections >= detection_threshold:
                         logger.warning(f"ACCIDENT CONFIRMED at {camera_name} ({camera_location})")
                         
-                        # Create alert
+                        # Create alert as PENDING_ADMIN_REVIEW
                         try:
                             db = await get_database()
-                            
-                            # Get hospital emails
-                            hospitals = await db["users"].find({"role": "hospital"}).to_list(1000)
-                            hospital_emails = [h["email"] for h in hospitals]
-                            
-                            # Create alert document
+
+                            # Save video snippet from buffered frames
+                            snippet_url = None
+                            if len(snippet_buffer) > 0:
+                                try:
+                                    snippet_filename = f"{uuid.uuid4()}.mp4"
+                                    snippet_path = str(snippets_dir / snippet_filename)
+                                    h, w = snippet_buffer[0].shape[:2]
+                                    # Use avc1 (H.264) for browser compatibility, fallback to mp4v
+                                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                                    writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
+                                    if not writer.isOpened():
+                                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                        writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
+                                    for f in snippet_buffer:
+                                        writer.write(f)
+                                    writer.release()
+                                    snippet_url = f"/alerts/snippet/{snippet_filename}"
+                                    logger.info(f"Snippet saved: {snippet_path} ({len(snippet_buffer)} frames)")
+                                except Exception as e:
+                                    logger.error(f"Error saving snippet: {e}")
+
+                            # Create alert document with pending status
                             alert_data = {
                                 "location": camera_location,
                                 "time": get_pkt_now(),
-                                "details": f"🚨 ACCIDENT DETECTED at {camera_name} with {confidence*100:.1f}% confidence. Automatic detection triggered by AI model.",
-                                "notified_hospitals": hospital_emails,
+                                "details": f"ACCIDENT DETECTED at {camera_name} with {confidence*100:.1f}% confidence. Automatic detection triggered by AI model.",
+                                "notified_hospitals": [],
                                 "camera_id": camera_id,
                                 "camera_name": camera_name,
-                                "confidence": confidence
+                                "confidence": confidence,
+                                "status": "PENDING_ADMIN_REVIEW",
+                                "dispatch_type": None,
+                                "admin_decision_time": None,
+                                "dispatched_at": None,
+                                "snippet_url": snippet_url
                             }
-                            
+
                             result = await db["alerts"].insert_one(alert_data)
-                            logger.info(f"Alert created with ID: {result.inserted_id}")
-                            
-                            # Send emails in background
-                            from ..services.email_service import email_service
-                            for email in hospital_emails:
-                                try:
-                                    # Create task without awaiting to send emails in background
-                                    asyncio.create_task(
-                                        email_service.send_alert_email(
-                                            to_email=email,
-                                            location=camera_location,
-                                            details=alert_data["details"],
-                                            time=alert_data["time"].strftime("%Y-%m-%d %H:%M:%S")
-                                        )
-                                    )
-                                    logger.info(f"Email task created for {email}")
-                                except Exception as e:
-                                    logger.error(f"Error creating email task for {email}: {e}")
-                            
+                            logger.info(f"Alert created with ID: {result.inserted_id} (PENDING_ADMIN_REVIEW)")
+
+                            # Schedule auto-dispatch after 15 seconds if admin doesn't respond
+                            from .alerts import schedule_auto_dispatch
+                            schedule_auto_dispatch(str(result.inserted_id))
+
                         except Exception as e:
                             logger.error(f"Error creating alert: {e}")
                         

@@ -19,6 +19,29 @@ async def lifespan(app: FastAPI):
         print("👤 Creating initial admin user...")
         await auth.create_initial_admin()
         print("✅ Admin setup completed")
+
+        # Migrate old alerts
+        from .database import get_database
+        from .models import get_pkt_now
+        from datetime import timedelta
+        db_inst = await get_database()
+
+        # 1) Alerts without status field (pre-migration)
+        r1 = await db_inst["alerts"].update_many(
+            {"status": {"$exists": False}},
+            {"$set": {"status": "EMERGENCY_DISPATCHED", "dispatch_type": "legacy", "admin_decision_time": None, "dispatched_at": None}}
+        )
+        if r1.modified_count > 0:
+            print(f"Migrated {r1.modified_count} old alerts (no status field)")
+
+        # 2) Stuck PENDING_ADMIN_REVIEW alerts older than 20s (no timer running after restart)
+        cutoff = get_pkt_now() - timedelta(seconds=20)
+        r2 = await db_inst["alerts"].update_many(
+            {"status": "PENDING_ADMIN_REVIEW", "time": {"$lt": cutoff}},
+            {"$set": {"status": "AUTO_DISPATCHED", "dispatch_type": "auto_timeout", "dispatched_at": get_pkt_now()}}
+        )
+        if r2.modified_count > 0:
+            print(f"Auto-dispatched {r2.modified_count} stale pending alerts")
         print("=" * 50)
     except Exception as e:
         import traceback

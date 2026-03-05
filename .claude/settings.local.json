@@ -15,7 +15,10 @@
       "Bash(uvicorn:*)",
       "Bash(pip3 install:*)",
       "Bash(source:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(npx vite:*)",
+      "Bash(curl:*)",
+      "Bash(ffmpeg:*)"
     ]
   }
 }

@@ -1,8 +1,223 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe, Activity, Bell } from 'lucide-react';
+import { AlertTriangle, Video, MapPin, Trash2, Camera, FileText, X, Mail, Globe, Activity, Bell, CheckCircle, XCircle, Clock, Zap } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '../context/AuthContext';
+
+const AUTO_DISPATCH_SECONDS = 15;
+const OVERLAY_DISPLAY_SECONDS = 15;
+
+const CountdownTimer = ({ createdAt }) => {
+    const [secondsLeft, setSecondsLeft] = useState(() => {
+        const elapsed = (Date.now() - new Date(createdAt).getTime()) / 1000;
+        return Math.max(0, Math.ceil(AUTO_DISPATCH_SECONDS - elapsed));
+    });
+
+    useEffect(() => {
+        if (secondsLeft <= 0) return;
+        const timer = setInterval(() => {
+            const elapsed = (Date.now() - new Date(createdAt).getTime()) / 1000;
+            const remaining = Math.max(0, Math.ceil(AUTO_DISPATCH_SECONDS - elapsed));
+            setSecondsLeft(remaining);
+            if (remaining <= 0) clearInterval(timer);
+        }, 500);
+        return () => clearInterval(timer);
+    }, [createdAt]);
+
+    if (secondsLeft <= 0) return <span className="text-xs text-gray-400">Auto-dispatching...</span>;
+
+    const urgency = secondsLeft <= 5 ? 'text-red-600 font-bold' : secondsLeft <= 10 ? 'text-orange-500 font-semibold' : 'text-yellow-600';
+
+    return (
+        <span className={`text-xs ${urgency} flex items-center`}>
+            <Clock className="h-3 w-3 mr-1" />
+            {secondsLeft}s
+        </span>
+    );
+};
+
+const StatusBadge = ({ status }) => {
+    const config = {
+        PENDING_ADMIN_REVIEW: { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-200', label: 'Pending Review' },
+        EMERGENCY_DISPATCHED: { bg: 'bg-red-100', text: 'text-red-800', border: 'border-red-200', label: 'Dispatched' },
+        AUTO_DISPATCHED: { bg: 'bg-orange-100', text: 'text-orange-800', border: 'border-orange-200', label: 'Auto-Dispatched' },
+        FALSE_ALARM: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-200', label: 'False Alarm' },
+    };
+    const c = config[status] || config.PENDING_ADMIN_REVIEW;
+    return (
+        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${c.bg} ${c.text} border ${c.border}`}>
+            {c.label}
+        </span>
+    );
+};
+
+const AlertReviewOverlay = ({ alert, queueSize, onConfirm, onReject, onDismiss }) => {
+    const [secondsLeft, setSecondsLeft] = useState(OVERLAY_DISPLAY_SECONDS);
+    const [acting, setActing] = useState(false);
+    const mountTimeRef = useRef(null);
+    const videoRef = useRef(null);
+
+    // Reset timer each time a NEW alert is shown
+    useEffect(() => {
+        if (!alert) return;
+        mountTimeRef.current = Date.now();
+        setActing(false);
+        setSecondsLeft(OVERLAY_DISPLAY_SECONDS);
+    }, [alert?._id]);
+
+    // Countdown based on when overlay appeared (not alert.time)
+    useEffect(() => {
+        if (!alert || !mountTimeRef.current) return;
+        const timer = setInterval(() => {
+            const elapsed = (Date.now() - mountTimeRef.current) / 1000;
+            const remaining = Math.max(0, Math.ceil(OVERLAY_DISPLAY_SECONDS - elapsed));
+            setSecondsLeft(remaining);
+            if (remaining <= 0) {
+                clearInterval(timer);
+                onDismiss(alert._id);
+            }
+        }, 500);
+        return () => clearInterval(timer);
+    }, [alert?._id]);
+
+    if (!alert) return null;
+
+    const progress = (secondsLeft / OVERLAY_DISPLAY_SECONDS) * 100;
+    const snippetSrc = alert.snippet_url ? `http://localhost:8000${alert.snippet_url}` : null;
+
+    const handleConfirm = async () => {
+        if (acting) return;
+        setActing(true);
+        await onConfirm(alert._id);
+    };
+
+    const handleReject = async () => {
+        if (acting) return;
+        setActing(true);
+        await onReject(alert._id);
+    };
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-start justify-center pt-4 px-4">
+            {/* Backdrop */}
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
+
+            {/* Alert Card */}
+            <div className="relative w-full max-w-2xl bg-white rounded-2xl shadow-2xl overflow-hidden border-2 border-red-500">
+                {/* Countdown progress bar */}
+                <div className="h-1.5 bg-gray-200 w-full">
+                    <div
+                        className={`h-full transition-all duration-500 ease-linear ${secondsLeft <= 5 ? 'bg-red-500' : secondsLeft <= 10 ? 'bg-orange-400' : 'bg-yellow-400'}`}
+                        style={{ width: `${progress}%` }}
+                    />
+                </div>
+
+                {/* Header */}
+                <div className="bg-red-600 px-6 py-4 flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                        <div className="bg-white/20 rounded-full p-2">
+                            <AlertTriangle className="h-6 w-6 text-white" />
+                        </div>
+                        <div>
+                            <h2 className="text-white font-bold text-lg">Accident Detected</h2>
+                            <p className="text-red-100 text-sm">Review and take action</p>
+                        </div>
+                    </div>
+                    <div className="flex items-center space-x-3">
+                        {queueSize > 1 && (
+                            <div className="bg-white/20 rounded-full px-3 py-1 text-white text-xs font-bold">
+                                +{queueSize - 1} more
+                            </div>
+                        )}
+                        <div className={`text-white font-mono text-2xl font-bold ${secondsLeft <= 5 ? 'animate-pulse' : ''}`}>
+                            {secondsLeft}s
+                        </div>
+                    </div>
+                </div>
+
+                {/* Content */}
+                <div className="p-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        {/* Video Snippet */}
+                        <div className="bg-gray-900 rounded-xl overflow-hidden aspect-video flex items-center justify-center">
+                            {snippetSrc ? (
+                                <video
+                                    ref={videoRef}
+                                    key={snippetSrc}
+                                    src={snippetSrc}
+                                    autoPlay
+                                    loop
+                                    muted
+                                    playsInline
+                                    controls
+                                    onLoadedData={() => {
+                                        // Force play in case autoplay is blocked
+                                        videoRef.current?.play().catch(() => {});
+                                    }}
+                                    className="w-full h-full object-cover"
+                                />
+                            ) : (
+                                <div className="text-center text-gray-400">
+                                    <Camera className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                                    <p className="text-sm">No clip available</p>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Details */}
+                        <div className="flex flex-col justify-between">
+                            <div className="space-y-3">
+                                <div className="flex items-center text-sm text-gray-700">
+                                    <MapPin className="h-4 w-4 mr-2 text-blue-500 flex-shrink-0" />
+                                    <span className="font-semibold">{alert.location}</span>
+                                </div>
+                                <div className="flex items-center text-sm text-gray-700">
+                                    <Camera className="h-4 w-4 mr-2 text-purple-500 flex-shrink-0" />
+                                    <span>{alert.camera_name || 'Unknown Camera'}</span>
+                                </div>
+                                <div className="flex items-center text-sm text-gray-700">
+                                    <Clock className="h-4 w-4 mr-2 text-gray-500 flex-shrink-0" />
+                                    <span>{new Date(alert.time).toLocaleString()}</span>
+                                </div>
+                                {alert.confidence && (
+                                    <div className="flex items-center text-sm text-gray-700">
+                                        <Zap className="h-4 w-4 mr-2 text-orange-500 flex-shrink-0" />
+                                        <span>Confidence: <span className="font-bold text-red-600">{(alert.confidence * 100).toFixed(1)}%</span></span>
+                                    </div>
+                                )}
+                                <p className="text-xs text-gray-500 mt-2 leading-relaxed">{alert.details}</p>
+                            </div>
+
+                            <div className="text-xs text-gray-400 mt-3 bg-gray-50 rounded-lg p-2 text-center">
+                                Auto-dispatch in <span className="font-bold text-gray-600">{secondsLeft}s</span> if no action taken
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex gap-4 mt-6">
+                        <button
+                            onClick={handleConfirm}
+                            disabled={acting}
+                            className="flex-1 flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold py-3.5 px-6 rounded-xl transition-all text-sm shadow-lg shadow-red-200"
+                        >
+                            <CheckCircle className="h-5 w-5" />
+                            Confirm & Dispatch Emergency
+                        </button>
+                        <button
+                            onClick={handleReject}
+                            disabled={acting}
+                            className="flex-1 flex items-center justify-center gap-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 font-bold py-3.5 px-6 rounded-xl transition-all text-sm border border-gray-300"
+                        >
+                            <XCircle className="h-5 w-5" />
+                            Reject (False Alarm)
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
 
 const StatCard = ({ title, value, icon: Icon, color }) => (
     <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex items-center space-x-4">
@@ -127,7 +342,7 @@ const LogsPanel = ({ alert, onClose, isOpen }) => {
                                 <span className="font-semibold text-red-700">Accident Detected</span>
                             </div>
                             <p className="text-gray-700 text-sm mb-3 ml-7">{alert.details}</p>
-                            <div className="flex items-center text-xs text-gray-500 ml-7 space-x-4">
+                            <div className="flex items-center text-xs text-gray-500 ml-7 space-x-4 flex-wrap gap-y-1">
                                 <span className="flex items-center">
                                     <MapPin className="h-3 w-3 mr-1" />
                                     {alert.location}
@@ -136,6 +351,7 @@ const LogsPanel = ({ alert, onClose, isOpen }) => {
                                     <Globe className="h-3 w-3 mr-1" />
                                     {new Date(alert.time).toLocaleString()}
                                 </span>
+                                <StatusBadge status={alert.status} />
                             </div>
                         </div>
                     </div>
@@ -144,7 +360,7 @@ const LogsPanel = ({ alert, onClose, isOpen }) => {
                         <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center justify-between">
                             <span>Email Recipients</span>
                             <span className="text-xs font-normal text-gray-400 normal-case bg-gray-100 px-2 py-0.5 rounded-full">
-                                {alert.notified_hospitals?.length || 0} sent
+                                {alert.notified_hospitals?.length || 0} {alert.status === 'PENDING_ADMIN_REVIEW' ? 'pending' : alert.status === 'FALSE_ALARM' ? 'not sent' : 'sent'}
                             </span>
                         </h4>
 
@@ -206,6 +422,10 @@ const DashboardOverview = () => {
     const [previousAlertCount, setPreviousAlertCount] = useState(0);
     const [notificationPermission, setNotificationPermission] = useState(false);
     const [toastNotifications, setToastNotifications] = useState([]);
+
+    // Alert review queue (for multiple simultaneous alerts)
+    const [reviewQueue, setReviewQueue] = useState([]);  // array of alert objects
+    const seenAlertIdsRef = useRef(new Set());            // alerts already queued or handled
 
     // Request notification permission on mount
     useEffect(() => {
@@ -389,12 +609,29 @@ const DashboardOverview = () => {
 
             const newAlerts = alertsRes.data;
 
-            // Check for new alerts and show notifications
+            // Queue new PENDING_ADMIN_REVIEW alerts for overlay (admin only)
+            if (user?.role === 'admin') {
+                const pendingAlerts = newAlerts.filter(a => a.status === 'PENDING_ADMIN_REVIEW');
+                const newForQueue = pendingAlerts.filter(a => !seenAlertIdsRef.current.has(a._id));
+                if (newForQueue.length > 0) {
+                    newForQueue.forEach(a => seenAlertIdsRef.current.add(a._id));
+                    setReviewQueue(prev => [...prev, ...newForQueue]);
+                    // Play alert sound for new arrivals
+                    try {
+                        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTUHG2m98OScTgwNUrDn77RnHwU7k9n0yXgqBSB0yO/ekEMME1+35+mhUBMJSKHh8rtoHwU7k9n0yXgqBR91x+/gkEIOFF+36OehTxMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEMME1+36OehTxMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEMOFF+35+mhUBQJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEQME1+35+mhUBQJSKHh8rtoHwU7k9n0yXgqBSB0x+/gkEQMFF+35+mhUBMJSKHh8rtoHwU7k9n0yXgqBR90x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBR90x+/gkEQME1635+mhUBMKSaLh8rtoHwU7k9n0yXgqBSB0x+/gkEQME1635+mhUBMKSaLh8g==');
+                        audio.play().catch(() => {});
+                    } catch (e) {}
+                }
+                // Remove alerts from queue that are no longer pending (server auto-dispatched)
+                const pendingIds = new Set(pendingAlerts.map(a => a._id));
+                setReviewQueue(prev => prev.filter(a => pendingIds.has(a._id)));
+            }
+
+            // Check for new alerts and show notifications (non-admin / browser notifications)
             if (previousAlertCount > 0 && newAlerts.length > previousAlertCount) {
-                // Get the new alerts (alerts that weren't in the previous fetch)
                 const alertsToNotify = newAlerts.slice(0, newAlerts.length - previousAlertCount);
-                alertsToNotify.forEach(alert => {
-                    showNotification(alert);
+                alertsToNotify.forEach(a => {
+                    showNotification(a);
                 });
             }
 
@@ -418,7 +655,7 @@ const DashboardOverview = () => {
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 10000);
+        const interval = setInterval(fetchData, 3000);
         return () => clearInterval(interval);
     }, []);
 
@@ -449,6 +686,46 @@ const DashboardOverview = () => {
             alert("Failed to delete all alerts");
         }
     };
+
+    // Remove an alert from the review queue (next one auto-shows)
+    const removeFromQueue = useCallback((id) => {
+        setReviewQueue(prev => prev.filter(a => a._id !== id));
+    }, []);
+
+    const handleConfirmAlert = async (id) => {
+        try {
+            await axios.post(`http://localhost:8000/alerts/${id}/confirm`);
+            removeFromQueue(id);
+            fetchData();
+        } catch (error) {
+            if (error.response?.status === 409) {
+                removeFromQueue(id);
+                fetchData();
+            } else {
+                console.error("Error confirming alert", error);
+            }
+        }
+    };
+
+    const handleRejectAlert = async (id) => {
+        try {
+            await axios.post(`http://localhost:8000/alerts/${id}/reject`);
+            removeFromQueue(id);
+            fetchData();
+        } catch (error) {
+            if (error.response?.status === 409) {
+                removeFromQueue(id);
+                fetchData();
+            } else {
+                console.error("Error rejecting alert", error);
+            }
+        }
+    };
+
+    // Called when overlay timer expires — dismiss this alert, next one will show
+    const handleDismissReview = useCallback((id) => {
+        removeFromQueue(id);
+    }, [removeFromQueue]);
 
     const openLogs = (alert) => {
         setSelectedAlert(alert);
@@ -484,7 +761,18 @@ const DashboardOverview = () => {
         <div className="p-8 relative">
             <h2 className="text-2xl font-bold text-gray-800 mb-6">Dashboard Overview</h2>
 
-            {/* Toast Notifications */}
+            {/* Alert Review Overlay - queue-based, shows one at a time */}
+            {user?.role === 'admin' && reviewQueue.length > 0 && (
+                <AlertReviewOverlay
+                    alert={reviewQueue[0]}
+                    queueSize={reviewQueue.length}
+                    onConfirm={handleConfirmAlert}
+                    onReject={handleRejectAlert}
+                    onDismiss={handleDismissReview}
+                />
+            )}
+
+            {/* Toast Notifications (for non-pending alerts / non-admin users) */}
             <div className="fixed top-4 right-4 z-50 space-y-3 max-w-md">
                 {toastNotifications.map((notification) => (
                     <div
@@ -498,7 +786,7 @@ const DashboardOverview = () => {
                             <Bell className="h-6 w-6 animate-bounce" />
                         </div>
                         <div className="flex-1 min-w-0">
-                            <p className="font-bold text-sm mb-1">🚨 New Alert Detected!</p>
+                            <p className="font-bold text-sm mb-1">New Alert Detected!</p>
                             <p className="text-xs opacity-90 mb-1">
                                 <MapPin className="h-3 w-3 inline mr-1" />
                                 {notification.location}
@@ -607,13 +895,36 @@ const DashboardOverview = () => {
                                         <p className="text-sm text-gray-600 line-clamp-2">{alert.details}</p>
                                     </td>
                                     <td className="px-6 py-4">
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 border border-red-200">
-                                            Critical
-                                        </span>
+                                        <div className="flex flex-col gap-1">
+                                            <StatusBadge status={alert.status} />
+                                            {alert.status === 'PENDING_ADMIN_REVIEW' && (
+                                                <CountdownTimer createdAt={alert.time} />
+                                            )}
+                                        </div>
                                     </td>
                                     {user?.role === 'admin' && (
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex items-center justify-end space-x-2">
+                                                {alert.status === 'PENDING_ADMIN_REVIEW' && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => handleConfirmAlert(alert._id)}
+                                                            className="flex items-center text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-md transition-colors text-xs font-medium shadow-sm"
+                                                            title="Confirm & Dispatch"
+                                                        >
+                                                            <CheckCircle className="h-4 w-4 mr-1.5" />
+                                                            Confirm
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleRejectAlert(alert._id)}
+                                                            className="flex items-center text-white bg-gray-500 hover:bg-gray-600 px-3 py-1.5 rounded-md transition-colors text-xs font-medium shadow-sm"
+                                                            title="Reject as False Alarm"
+                                                        >
+                                                            <XCircle className="h-4 w-4 mr-1.5" />
+                                                            Reject
+                                                        </button>
+                                                    </>
+                                                )}
                                                 <button
                                                     onClick={() => openLogs(alert)}
                                                     className="flex items-center text-blue-600 hover:text-blue-800 px-3 py-1.5 rounded-md hover:bg-blue-50 transition-colors text-xs font-medium border border-transparent hover:border-blue-200"

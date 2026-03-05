@@ -106,10 +106,17 @@ class AlertModel(BaseModel):
     time: datetime = Field(default_factory=get_pkt_now)
     details: str
     notified_hospitals: List[EmailStr] = []
+    status: str = "PENDING_ADMIN_REVIEW"  # PENDING_ADMIN_REVIEW, EMERGENCY_DISPATCHED, AUTO_DISPATCHED, FALSE_ALARM
+    dispatch_type: Optional[str] = None  # "admin_confirmed", "auto_timeout", None
+    admin_decision_time: Optional[datetime] = None
+    dispatched_at: Optional[datetime] = None
+    camera_id: Optional[str] = None
+    camera_name: Optional[str] = None
+    confidence: Optional[float] = None
+    snippet_url: Optional[str] = None
 
-    @field_serializer('time')
-    def serialize_time(self, dt: datetime, _info):
-        # MongoDB expects timezone-aware datetime, return as-is
+    @field_serializer('time', 'admin_decision_time', 'dispatched_at')
+    def serialize_time(self, dt: Optional[datetime], _info):
         return dt
 
     model_config = {

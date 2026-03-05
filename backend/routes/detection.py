@@ -136,11 +136,18 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
     consecutive_failures = 0
     max_failures = 10  # Stop detection after this many consecutive failures
 
-    # Rolling buffer for video snippet capture (~3 seconds at ~15fps)
+    # Rolling buffer for video snippet capture (~3 seconds before at ~15fps)
     snippet_buffer = deque(maxlen=45)
     # Get source FPS for snippet encoding
     source_fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
     snippet_fps = min(source_fps, 15.0)
+
+    # Post-capture state: after trigger, capture more frames to include the accident
+    POST_CAPTURE_FRAMES = 30  # ~2 seconds of post-accident footage
+    post_capture_remaining = 0
+    post_capture_frames = []
+    post_capture_confidence = 0.0
+    post_capture_time = None
 
     # Snippets directory
     snippets_dir = Path(__file__).resolve().parent.parent / "uploads" / "snippets"
@@ -183,64 +190,47 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
 
             # Reset failure counter on successful read
             consecutive_failures = 0
-            
-            if frame is not None:
-                # Buffer frames for snippet capture
-                snippet_buffer.append(frame.copy())
 
-                # Process frame for accident detection
-                is_accident, confidence = await accident_detection_service.process_frame(camera_id, frame)
-                
-                # Handle cooldown
-                if cooldown_frames > 0:
-                    cooldown_frames -= 1
-                    consecutive_detections = 0
-                    await asyncio.sleep(0.05)
-                    continue
-                
-                # Track consecutive detections
-                if is_accident:
-                    consecutive_detections += 1
-                    logger.info(f"Accident detected! Consecutive: {consecutive_detections}, Confidence: {confidence:.4f}")
-                    
-                    # Trigger alert if we have enough consecutive detections
-                    if consecutive_detections >= detection_threshold:
-                        logger.warning(f"ACCIDENT CONFIRMED at {camera_name} ({camera_location})")
-                        
-                        # Create alert as PENDING_ADMIN_REVIEW
+            if frame is not None:
+                # --- Post-capture phase: collecting frames after accident trigger ---
+                if post_capture_remaining > 0:
+                    post_capture_frames.append(frame.copy())
+                    post_capture_remaining -= 1
+
+                    if post_capture_remaining == 0:
+                        # Post-capture done — save snippet & create alert
                         try:
                             db = await get_database()
 
-                            # Save video snippet from buffered frames
+                            # Combine pre-trigger buffer + post-trigger frames
+                            all_frames = list(snippet_buffer) + post_capture_frames
                             snippet_url = None
-                            if len(snippet_buffer) > 0:
+                            if len(all_frames) > 0:
                                 try:
                                     snippet_filename = f"{uuid.uuid4()}.mp4"
                                     snippet_path = str(snippets_dir / snippet_filename)
-                                    h, w = snippet_buffer[0].shape[:2]
-                                    # Use avc1 (H.264) for browser compatibility, fallback to mp4v
+                                    h, w = all_frames[0].shape[:2]
                                     fourcc = cv2.VideoWriter_fourcc(*'avc1')
                                     writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
                                     if not writer.isOpened():
                                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                                         writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
-                                    for f in snippet_buffer:
+                                    for f in all_frames:
                                         writer.write(f)
                                     writer.release()
                                     snippet_url = f"/alerts/snippet/{snippet_filename}"
-                                    logger.info(f"Snippet saved: {snippet_path} ({len(snippet_buffer)} frames)")
+                                    logger.info(f"Snippet saved: {snippet_path} ({len(all_frames)} frames: {len(snippet_buffer)} pre + {len(post_capture_frames)} post)")
                                 except Exception as e:
                                     logger.error(f"Error saving snippet: {e}")
 
-                            # Create alert document with pending status
                             alert_data = {
                                 "location": camera_location,
-                                "time": get_pkt_now(),
-                                "details": f"ACCIDENT DETECTED at {camera_name} with {confidence*100:.1f}% confidence. Automatic detection triggered by AI model.",
+                                "time": post_capture_time,
+                                "details": f"ACCIDENT DETECTED at {camera_name} with {post_capture_confidence*100:.1f}% confidence. Automatic detection triggered by AI model.",
                                 "notified_hospitals": [],
                                 "camera_id": camera_id,
                                 "camera_name": camera_name,
-                                "confidence": confidence,
+                                "confidence": post_capture_confidence,
                                 "status": "PENDING_ADMIN_REVIEW",
                                 "dispatch_type": None,
                                 "admin_decision_time": None,
@@ -251,20 +241,55 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                             result = await db["alerts"].insert_one(alert_data)
                             logger.info(f"Alert created with ID: {result.inserted_id} (PENDING_ADMIN_REVIEW)")
 
-                            # Schedule auto-dispatch after 15 seconds if admin doesn't respond
                             from .alerts import schedule_auto_dispatch
                             schedule_auto_dispatch(str(result.inserted_id))
 
                         except Exception as e:
                             logger.error(f"Error creating alert: {e}")
-                        
+
+                        # Cleanup post-capture state
+                        post_capture_frames = []
+                        snippet_buffer.clear()
+
+                    await asyncio.sleep(0.05)
+                    continue
+
+                # --- Normal detection phase ---
+                # Buffer frames for snippet capture
+                snippet_buffer.append(frame.copy())
+
+                # Process frame for accident detection
+                is_accident, confidence = await accident_detection_service.process_frame(camera_id, frame)
+
+                # Handle cooldown
+                if cooldown_frames > 0:
+                    cooldown_frames -= 1
+                    consecutive_detections = 0
+                    await asyncio.sleep(0.05)
+                    continue
+
+                # Track consecutive detections
+                if is_accident:
+                    consecutive_detections += 1
+                    logger.info(f"Accident detected! Consecutive: {consecutive_detections}, Confidence: {confidence:.4f}")
+
+                    # Trigger alert if we have enough consecutive detections
+                    if consecutive_detections >= detection_threshold:
+                        logger.warning(f"ACCIDENT CONFIRMED at {camera_name} ({camera_location})")
+
+                        # Start post-capture phase instead of saving immediately
+                        post_capture_remaining = POST_CAPTURE_FRAMES
+                        post_capture_frames = []
+                        post_capture_confidence = confidence
+                        post_capture_time = get_pkt_now()
+
                         # Reset and start cooldown
                         consecutive_detections = 0
                         cooldown_frames = cooldown_period
                 else:
                     # Reset counter if no accident detected
                     consecutive_detections = 0
-            
+
             # Control frame rate (approx 10-15 fps processing)
             await asyncio.sleep(0.05)
 

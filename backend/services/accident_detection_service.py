@@ -109,14 +109,16 @@ class AccidentDetectionService:
             # Make prediction
             prediction = self.model.predict(sequence, verbose=0)
             
-            # Get confidence score for Accident class (index 1)
-            # Index 0 is Normal, Index 1 is Accident
-            confidence = float(prediction[0][1])
-            
-            # Threshold for accident detection (raised from 0.5 to 0.7 to reduce false positives)
-            is_accident = confidence > 0.7
-            
-            logger.info(f"Prediction: {confidence:.4f}, Accident: {is_accident}")
+            # Index 0 = Normal, Index 1 = Accident
+            normal_conf = float(prediction[0][0])
+            accident_conf = float(prediction[0][1])
+
+            confidence = accident_conf
+
+            # Threshold for accident detection
+            is_accident = confidence > 0.5
+
+            logger.info(f"Prediction - Normal: {normal_conf:.4f}, Accident: {accident_conf:.4f}, Triggered: {is_accident}")
             
             return is_accident, confidence
             

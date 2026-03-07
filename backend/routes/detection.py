@@ -130,20 +130,19 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
         return
 
     consecutive_detections = 0
-    detection_threshold = 3  # Number of consecutive detections before triggering alert
+    detection_threshold = 3  # Number of consecutive predictions before triggering alert
     cooldown_frames = 0
-    cooldown_period = 150  # Frames to wait after an alert
+    cooldown_period = 300  # Frames to wait after an alert (~10s at 30fps)
     consecutive_failures = 0
-    max_failures = 10  # Stop detection after this many consecutive failures
+    max_failures = 10
 
-    # Rolling buffer for video snippet capture (~3 seconds before at ~15fps)
-    snippet_buffer = deque(maxlen=45)
-    # Get source FPS for snippet encoding
-    source_fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
-    snippet_fps = min(source_fps, 15.0)
+    # Rolling buffer for video snippet capture
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_delay = 1.0 / source_fps
+    snippet_buffer = deque(maxlen=int(source_fps * 5))  # ~5 seconds of pre-trigger video
 
-    # Post-capture state: after trigger, capture more frames to include the accident
-    POST_CAPTURE_FRAMES = 30  # ~2 seconds of post-accident footage
+    # Post-capture state
+    POST_CAPTURE_FRAMES = int(source_fps * 3)  # ~3 seconds of post-accident footage
     post_capture_remaining = 0
     post_capture_frames = []
     post_capture_confidence = 0.0
@@ -155,25 +154,32 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
 
     loop = asyncio.get_event_loop()
 
+    # Non-blocking prediction: fire prediction in background, check result later
+    pending_prediction = None  # asyncio.Future or None
+    frame_count = 0
+    PREDICT_EVERY = 16  # Run prediction every N frames
+
+    # Initialize model frame buffer
+    if camera_id not in accident_detection_service.frame_buffers:
+        accident_detection_service.frame_buffers[camera_id] = deque(maxlen=accident_detection_service.sequence_length)
+
     while accident_detection_service.is_detection_active(camera_id):
         try:
-            # Read frame in a separate thread to avoid blocking the event loop
             ret, frame = await loop.run_in_executor(None, cap.read)
 
             if not ret:
                 consecutive_failures += 1
-                logger.warning(f"Failed to read frame from camera {camera_id} ({consecutive_failures}/{max_failures}), retrying...")
+                logger.warning(f"Failed to read frame from camera {camera_id} ({consecutive_failures}/{max_failures})")
 
-                # Check if video ended (for file-based streams, loop it)
                 if not camera_url.startswith(("http://", "https://", "rtsp://")):
-                    logger.info(f"Video file ended for camera {camera_id}, restarting from beginning...")
+                    logger.info(f"Video file ended for camera {camera_id}, restarting...")
                     cap.release()
                     cap = cv2.VideoCapture(camera_url)
-                    consecutive_failures = 0  # Reset counter for looped videos
+                    consecutive_failures = 0
                     continue
 
                 if consecutive_failures >= max_failures:
-                    logger.error(f"Max consecutive failures reached for camera {camera_id}, stopping detection")
+                    logger.error(f"Max failures reached for camera {camera_id}, stopping")
                     accident_detection_service.stop_detection(camera_id)
                     db = await get_database()
                     await db["cameras"].update_one(
@@ -183,43 +189,42 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                     break
 
                 await asyncio.sleep(1)
-                # Try to reopen
                 cap.release()
                 cap = cv2.VideoCapture(camera_url)
                 continue
 
-            # Reset failure counter on successful read
             consecutive_failures = 0
 
             if frame is not None:
-                # --- Post-capture phase: collecting frames after accident trigger ---
+                frame_count += 1
+
+                # --- Post-capture phase: collect frames after accident trigger ---
                 if post_capture_remaining > 0:
                     post_capture_frames.append(frame.copy())
                     post_capture_remaining -= 1
 
                     if post_capture_remaining == 0:
-                        # Post-capture done — save snippet & create alert
                         try:
                             db = await get_database()
 
-                            # Combine pre-trigger buffer + post-trigger frames
                             all_frames = list(snippet_buffer) + post_capture_frames
                             snippet_url = None
                             if len(all_frames) > 0:
                                 try:
+                                    write_fps = source_fps
                                     snippet_filename = f"{uuid.uuid4()}.mp4"
                                     snippet_path = str(snippets_dir / snippet_filename)
                                     h, w = all_frames[0].shape[:2]
                                     fourcc = cv2.VideoWriter_fourcc(*'avc1')
-                                    writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
+                                    writer = cv2.VideoWriter(snippet_path, fourcc, write_fps, (w, h))
                                     if not writer.isOpened():
                                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                                        writer = cv2.VideoWriter(snippet_path, fourcc, snippet_fps, (w, h))
+                                        writer = cv2.VideoWriter(snippet_path, fourcc, write_fps, (w, h))
                                     for f in all_frames:
                                         writer.write(f)
                                     writer.release()
                                     snippet_url = f"/alerts/snippet/{snippet_filename}"
-                                    logger.info(f"Snippet saved: {snippet_path} ({len(all_frames)} frames: {len(snippet_buffer)} pre + {len(post_capture_frames)} post)")
+                                    logger.info(f"Snippet saved: {snippet_path} ({len(all_frames)} frames at {write_fps:.0f}fps)")
                                 except Exception as e:
                                     logger.error(f"Error saving snippet: {e}")
 
@@ -247,54 +252,61 @@ async def detection_loop(camera_id: str, camera_url: str, camera_name: str, came
                         except Exception as e:
                             logger.error(f"Error creating alert: {e}")
 
-                        # Cleanup post-capture state
                         post_capture_frames = []
                         snippet_buffer.clear()
 
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(frame_delay)
                     continue
 
-                # --- Normal detection phase ---
-                # Buffer frames for snippet capture
+                # --- Normal phase: buffer frames for snippets + run detection ---
                 snippet_buffer.append(frame.copy())
 
-                # Process frame for accident detection
-                is_accident, confidence = await accident_detection_service.process_frame(camera_id, frame)
-
-                # Handle cooldown
                 if cooldown_frames > 0:
                     cooldown_frames -= 1
-                    consecutive_detections = 0
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(frame_delay)
                     continue
 
-                # Track consecutive detections
-                if is_accident:
-                    consecutive_detections += 1
-                    logger.info(f"Accident detected! Consecutive: {consecutive_detections}, Confidence: {confidence:.4f}")
+                # Preprocess and add to model buffer (fast — no prediction here)
+                processed = accident_detection_service.preprocess_frame(frame)
+                accident_detection_service.frame_buffers[camera_id].append(processed)
 
-                    # Trigger alert if we have enough consecutive detections
-                    if consecutive_detections >= detection_threshold:
-                        logger.warning(f"ACCIDENT CONFIRMED at {camera_name} ({camera_location})")
+                # Check if a background prediction finished
+                if pending_prediction is not None and pending_prediction.done():
+                    try:
+                        is_accident, confidence = pending_prediction.result()
+                        if is_accident:
+                            consecutive_detections += 1
+                            logger.info(f"Accident detected! Consecutive: {consecutive_detections}, Confidence: {confidence:.4f}")
+                            if consecutive_detections >= detection_threshold:
+                                logger.warning(f"ACCIDENT CONFIRMED at {camera_name} ({camera_location})")
+                                post_capture_remaining = POST_CAPTURE_FRAMES
+                                post_capture_frames = []
+                                post_capture_confidence = confidence
+                                post_capture_time = get_pkt_now()
+                                consecutive_detections = 0
+                                cooldown_frames = cooldown_period
+                        else:
+                            consecutive_detections = 0
+                    except Exception as e:
+                        logger.error(f"Prediction error: {e}")
+                    pending_prediction = None
 
-                        # Start post-capture phase instead of saving immediately
-                        post_capture_remaining = POST_CAPTURE_FRAMES
-                        post_capture_frames = []
-                        post_capture_confidence = confidence
-                        post_capture_time = get_pkt_now()
+                # Fire off a new prediction if none is running
+                if (pending_prediction is None and
+                    frame_count % PREDICT_EVERY == 0 and
+                    len(accident_detection_service.frame_buffers[camera_id]) >= accident_detection_service.sequence_length):
+                    # Snapshot the buffer so the executor thread reads a stable copy
+                    buffer_snapshot = deque(list(accident_detection_service.frame_buffers[camera_id]),
+                                           maxlen=accident_detection_service.sequence_length)
+                    pending_prediction = loop.run_in_executor(
+                        None,
+                        accident_detection_service.predict_accident,
+                        buffer_snapshot
+                    )
 
-                        # Reset and start cooldown
-                        consecutive_detections = 0
-                        cooldown_frames = cooldown_period
-                else:
-                    # Reset counter if no accident detected
-                    consecutive_detections = 0
-
-            # Control frame rate (approx 10-15 fps processing)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(frame_delay)
 
         except asyncio.CancelledError:
-            # Task was cancelled (stop detection was called)
             logger.info(f"Detection task cancelled for camera {camera_id}")
             break
         except Exception as e:
